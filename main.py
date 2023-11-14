@@ -1,36 +1,27 @@
-# %%
 from pathlib import Path
 
 import torch
-import torchvision
-from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
-
 from BYOL import BYOL
 from model import Model
-
-%load_ext autoreload
-%autoreload 2
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
+from utils import argparser, get_loaders_CIFAR10, get_training_name
 
 torch.manual_seed(42)
 
-training_name = "pretrain-cnn-60"
-pretrain = True
-only_cnn = True
+test = False
+device = "cuda"
 
-batch_size = 200
-pretrain_epochs = 5
-train_epochs = 40
-device = "mps"
+# pretrain = True
+# only_cnn = False
 
-data = torchvision.datasets.CIFAR10("./data", download=True, transform=torchvision.transforms.ToTensor(), train=True)
-val_data = torchvision.datasets.CIFAR10(
-    "./data", download=True, transform=torchvision.transforms.ToTensor(), train=False
-)
+# batch_size = 300
+# pretrain_epochs = 20
+# train_epochs = 20
 
-loader = DataLoader(data, batch_size=batch_size)
-val_loader = DataLoader(val_data, batch_size=batch_size)
+batch_size, pretrain, only_cnn, pretrain_epochs, train_epochs = argparser()
+training_name = get_training_name(batch_size, pretrain, only_cnn, pretrain_epochs, train_epochs)
+loader, val_loader = get_loaders_CIFAR10(batch_size, test=test)
 
 model = Model(3, 10).to(device)
 model.train()
@@ -45,20 +36,19 @@ if pretrain:
     )
     byol.pretrain()
 
-    models_folder = Path("./models").mkdir(exist_ok=True)
-    only_cnn_str = "_only_cnn" if only_cnn else ""
-    pretrain_epochs_str = f"_pretrain_epochs_{pretrain_epochs}" if pretrain_epochs > 0 else ""
-    torch.save(model.state_dict(), f"./models/pretrained{only_cnn_str}{pretrain_epochs_str}_{training_name}.pth")
+    models_folder = Path("./models")
+    if not models_folder.exists():
+        models_folder.mkdir()
+    torch.save(model.state_dict(), f"./models/{training_name}.pth")
 
 
-# %%
 # ############ TRAINING ############
 print("Training")
 
 logger = SummaryWriter(log_dir="./logs/" + training_name, comment="CIFAR10")
 
 loss = torch.nn.CrossEntropyLoss()
-opt = torch.optim.Adam(model.parameters(), lr=3e-4)
+opt = torch.optim.Adam(model.parameters(), lr=3e-5)
 for epoch in range(train_epochs):
     # # train loop
     loop = tqdm(loader)
@@ -98,3 +88,4 @@ for epoch in range(train_epochs):
 
     logger.add_scalar("Loss/val", sum(losses) / len(losses), epoch)
     logger.add_scalar("Accuracy/val", sum(accuracies) / len(loader.dataset), epoch)
+
