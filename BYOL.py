@@ -1,11 +1,13 @@
 # %%
 import copy
+import time
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as T
+from augmentations import ByolAugmentations
 from tqdm import tqdm
 
 
@@ -31,16 +33,13 @@ class BYOL(nn.Module):
         for param in self.teacher.parameters():
             param.requires_grad = False
 
-        self.optimizer = torch.optim.Adam(self.student.parameters(), lr=3e-4)
-
+        # defining objects and variables for the training
+        self.optimizer = torch.optim.Adam(self.student.parameters(), lr=3e-5)
         self.dataloader = dataloader
-
         self.num_epochs = num_epochs
         self.total_steps = len(dataloader) * num_epochs
-
         self.tau = tau_base
         self.tau_base = tau_base
-
         self.input_dims = input_dims
         self.img_dims = img_dims
         self.device = device
@@ -48,19 +47,7 @@ class BYOL(nn.Module):
         self.output_features = output_features
 
         self.projection_head = self.get_projection_head().to(device)
-
-        self.aug1 = T.Compose(
-            [
-                T.RandomHorizontalFlip(),
-                T.RandomRotation((-15, 15)),
-                T.GaussianBlur(3, sigma=(0.1, 2.0)),
-            ]
-        )
-        self.aug2 = T.Compose(
-            [
-                T.RandomAffine(translate=(0.1, 0.2), degrees=(5, 15), shear=(5, 15)),
-            ]
-        )
+        self.aug1, self.aug2 = ByolAugmentations(img_dims).get_augmentations()
 
     def get_projection_head(self):
         mock_input = torch.randn(1, self.input_dims, *self.img_dims).to(self.device)
@@ -68,7 +55,9 @@ class BYOL(nn.Module):
 
         projection_head = nn.Sequential(
             nn.Linear(mock_output.shape[-1], self.hidden_features),
-            nn.BatchNorm2d(mock_output.shape[1]) if len(mock_output.shape) > 2 else nn.BatchNorm1d(mock_output.shape[1]),
+            nn.BatchNorm2d(mock_output.shape[1])
+            if len(mock_output.shape) > 2
+            else nn.BatchNorm1d(self.hidden_features),
             nn.ReLU(),
             nn.Linear(self.hidden_features, self.output_features),
         )
@@ -83,7 +72,7 @@ class BYOL(nn.Module):
 
     def augment(self, x):
         view1 = self.aug1(x)
-        view2 = self.aug1(x)
+        view2 = self.aug2(x)
         return view1, view2
 
     def loss_fn(self, student_out, teacher_out):
@@ -132,9 +121,8 @@ class BYOL(nn.Module):
 
 if __name__ == "__main__":
     import torchvision
-    from torch.utils.data import DataLoader
-
     from model import Model
+    from torch.utils.data import DataLoader
 
     model = Model(3, 10)
     original_weights = copy.deepcopy(model.state_dict())
