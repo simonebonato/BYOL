@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+from augmentations import ByolAugmentations
 from BYOL import BYOL
 from model import Model
 from torch.utils.tensorboard import SummaryWriter
@@ -10,16 +11,19 @@ from utils import argparser, get_loaders_CIFAR10, get_training_name
 torch.manual_seed(42)
 
 test = False
+use_argparser = False
 device = "cuda"
 
-# pretrain = True
-# only_cnn = False
+if not use_argparser:
+    pretrain = False
+    only_cnn = False
 
-# batch_size = 300
-# pretrain_epochs = 20
-# train_epochs = 20
+    batch_size = 300
+    pretrain_epochs = 20
+    train_epochs = 100
+else:
+    batch_size, pretrain, only_cnn, pretrain_epochs, train_epochs = argparser()
 
-batch_size, pretrain, only_cnn, pretrain_epochs, train_epochs = argparser()
 training_name = get_training_name(batch_size, pretrain, only_cnn, pretrain_epochs, train_epochs)
 loader, val_loader = get_loaders_CIFAR10(batch_size, test=test)
 
@@ -49,12 +53,14 @@ logger = SummaryWriter(log_dir="./logs/" + training_name, comment="CIFAR10")
 
 loss = torch.nn.CrossEntropyLoss()
 opt = torch.optim.Adam(model.parameters(), lr=3e-5)
+augs = ByolAugmentations((32, 32)).get_augmentations()[0]
 for epoch in range(train_epochs):
     # # train loop
     loop = tqdm(loader)
     losses = []
+    accuracies = []
     for x, y in loop:
-        x = x.to(device)
+        x = (augs(x)).to(device)
         y = y.to(device)
 
         opt.zero_grad()
@@ -64,10 +70,14 @@ for epoch in range(train_epochs):
         l.backward()
         opt.step()
 
+        acc = (out.argmax(dim=1) == y).float().sum()
+        accuracies.append(acc.item())
+
         losses.append(l.item())
-        loop.set_description(f"Train: Epoch {epoch} - Loss: {l.item():.2f}")
+        loop.set_description(f"Train: Epoch {epoch} - Loss: {l.item():.2f} - Acc: {acc.item():.2f}")
 
     logger.add_scalar("Loss/train", sum(losses) / len(losses), epoch)
+    logger.add_scalar("Accuracy/train", sum(accuracies) / len(loader.dataset), epoch)
 
     # val loop
     loop = tqdm(val_loader)
@@ -84,8 +94,7 @@ for epoch in range(train_epochs):
         accuracies.append(acc.item())
 
         losses.append(l.item())
-        loop.set_description(f"Val: Epoch {epoch} - Loss: {l.item():.2f}")
+        loop.set_description(f"Val: Epoch {epoch} - Loss: {l.item():.2f} - Acc: {acc.item():.2f}")
 
     logger.add_scalar("Loss/val", sum(losses) / len(losses), epoch)
-    logger.add_scalar("Accuracy/val", sum(accuracies) / len(loader.dataset), epoch)
-
+    logger.add_scalar("Accuracy/val", sum(accuracies) / len(val_loader.dataset), epoch)
