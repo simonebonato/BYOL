@@ -38,7 +38,7 @@ class ProjectAndNormalize2D(nn.Module):
         self.projection_layer = nn.Sequential(
             nn.Linear(mock_output.shape[-1], hidden_size),
             nn.BatchNorm1d(hidden_size),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(hidden_size, output_size),
         ).to(device)
 
@@ -49,7 +49,7 @@ class ProjectAndNormalize2D(nn.Module):
 
 
 class LinearEvaluator(nn.Module):
-    def __init__(self, mock_input, n_classes, device, lr=1e-3, epochs=50):
+    def __init__(self, mock_input, n_classes, device, lr=3e-4, epochs=30):
         super(LinearEvaluator, self).__init__()
         in_dims = mock_input.flatten(start_dim=1).shape[1]
 
@@ -62,13 +62,14 @@ class LinearEvaluator(nn.Module):
         self.device = device
         self.to(self.device)
 
-    def forward_backward(self, x, y, student_model):
+    def forward_backward(self, x, y, student_model, backward=True):
         x = x.to(self.device)
         y = y.to(self.device)
 
         student_out = student_model(x)
         _, loss, preds = self(student_out, y)
-        self.backward(loss)
+        if backward:
+            self.backward(loss)
         return loss, preds
 
     def forward(self, x, y):
@@ -111,7 +112,7 @@ class BYOL(nn.Module):
         self.change_requires_grad(self.teacher, False)
 
         # defining objects and variables for the training
-        self.optimizer = torch.optim.Adam(self.student.parameters(), lr=3e-5)
+        self.optimizer = torch.optim.Adam(self.student.parameters(), lr=3e-4)
         self.dataloader = dataloader
         self.val_dataloader = val_dataloader
         self.num_epochs = num_epochs
@@ -145,8 +146,9 @@ class BYOL(nn.Module):
             return ProjectAndNormalize4D(mock_output, self.hidden_features, self.output_features, self.device)
 
     def update_teacher(self):
-        for name, teacher_weight in self.teacher.named_parameters():
-            teacher_weight.data = self.tau * teacher_weight.data + (1 - self.tau) * self.student.state_dict()[name].data
+        for student_param, teacher_param in zip(self.student.parameters(), self.teacher.parameters()):
+            update_weights, old_weight = student_param.data, teacher_param.data
+            teacher_param.data = self.tau * old_weight + (1 - self.tau) * update_weights
 
     def update_tau(self, step):
         self.tau = 1 - (1 - self.tau_base) * ((np.cos((np.pi * step) / self.total_steps) + 1) / 2)
@@ -161,7 +163,7 @@ class BYOL(nn.Module):
         teacher_out = F.normalize(teacher_out, dim=-1, p=2)
 
         loss = 2 - 2 * (student_out * teacher_out).sum(dim=-1)
-        return loss.mean()
+        return loss
 
     def forward_pass(self, x):
         view1, view2 = self.augment(x)
@@ -169,12 +171,13 @@ class BYOL(nn.Module):
         student_out_1 = self.projection_head(self.student(view1))
         student_out_2 = self.projection_head(self.student(view2))
 
-        teacher_out1 = self.projection_head(self.teacher(view1))
-        teacher_out2 = self.projection_head(self.teacher(view2))
+        with torch.no_grad():
+            teacher_out1 = self.projection_head(self.teacher(view1))
+            teacher_out2 = self.projection_head(self.teacher(view2))
 
-        loss = self.loss_fn(student_out_1, teacher_out1) + self.loss_fn(student_out_2, teacher_out2)
+        loss = self.loss_fn(student_out_1, teacher_out2) + self.loss_fn(student_out_2, teacher_out1)
 
-        return loss
+        return loss.mean()
 
     def backward_pass(self, loss):
         self.optimizer.zero_grad()
@@ -185,6 +188,10 @@ class BYOL(nn.Module):
         step_counter = 0
         for epoch in range(self.num_epochs):
             loop = tqdm(enumerate(self.dataloader), leave=False)
+
+            if epoch % self.lin_evaluation_frequency == 0:
+                self.linear_evaluation(epoch)
+
             for idx, (x, _) in loop:
                 loop.set_description(
                     f"Epoch {epoch + 1} / {self.num_epochs} | Step {idx} / {len(self.dataloader)} | Tau: {self.tau:.4f}"
@@ -196,9 +203,6 @@ class BYOL(nn.Module):
                 self.update_teacher()
                 self.update_tau(step_counter)
                 step_counter += 1
-
-            if epoch % self.lin_evaluation_frequency == 0:
-                self.linear_evaluation(epoch)
 
     def linear_evaluation(self, after_k_epochs):
         print(f"\nPerforming linear evaluation after {after_k_epochs} epochs!\n")
@@ -219,7 +223,8 @@ class BYOL(nn.Module):
 
             linear_eval.eval()
             for idx, (x, y) in enumerate(self.val_dataloader):
-                loss, preds = linear_eval.forward_backward(x, y, self.student)
+                with torch.no_grad():
+                    loss, preds = linear_eval.forward_backward(x, y, self.student, backward=False)
 
                 # calculate the loss and the accuracy
                 val_loss += loss.item()
@@ -237,5 +242,3 @@ class BYOL(nn.Module):
         self.change_requires_grad(self.student, True)
         logger.flush()
         logger.close()
-
-
