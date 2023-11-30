@@ -25,37 +25,47 @@ class ProjectAndNormalize4D(nn.Module):
             nn.Linear(hidden_size, output_size),
         ).to(device)
 
-        self.proj_output_shape = self.projection_layer(mock_output).shape
-
     def forward(self, x):
         return self.projection_layer(x)
 
 
-class ProjectAndNormalize2D(nn.Module):
-    def __init__(self, mock_output, hidden_size, output_size, device):
-        super(ProjectAndNormalize2D, self).__init__()
+class MLP(nn.Module):
+    def __init__(self, input_size, output_size, hidden_size, device):
+        super(MLP, self).__init__()
 
         self.projection_layer = nn.Sequential(
-            nn.Linear(mock_output.shape[-1], hidden_size),
+            nn.Linear(input_size, hidden_size),
             nn.BatchNorm1d(hidden_size),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_size, output_size),
         ).to(device)
 
-        self.proj_output_shape = self.projection_layer(mock_output).shape
-
     def forward(self, x):
         return self.projection_layer(x)
 
 
+class StudentWrapper(nn.Module):
+    def __init__(self, student_net, projection_head, prediction_head):
+        super(StudentWrapper, self).__init__()
+        self.student_net = student_net
+        self.projection_head = projection_head
+        self.prediction_head = prediction_head
+
+    def forward(self, x):
+        x = self.student_net(x)
+        x = self.projection_head(x)
+        x = self.prediction_head(x)
+        return x
+
+
 class LinearEvaluator(nn.Module):
-    def __init__(self, mock_input, n_classes, device, lr=3e-4, epochs=30):
+    def __init__(self, mock_input, n_classes, device, lr=1e-4, epochs=30):
         super(LinearEvaluator, self).__init__()
         in_dims = mock_input.flatten(start_dim=1).shape[1]
 
         self.flatten = nn.Flatten(start_dim=1)
-        self.linear = nn.Linear(in_dims, n_classes)
-        self.optimizer = torch.optim.Adam(self.linear.parameters(), lr)
+        self.linear_evaluator = nn.Linear(in_dims, n_classes)
+        self.optimizer = torch.optim.Adam(self.linear_evaluator.parameters(), lr)
         self.epochs = epochs
 
         self.loss_fn = nn.CrossEntropyLoss()
@@ -74,7 +84,7 @@ class LinearEvaluator(nn.Module):
 
     def forward(self, x, y):
         x = self.flatten(x)
-        x = self.linear(x)
+        x = self.linear_evaluator(x)
 
         loss = self.loss_fn(x, y)
         predictions = torch.argmax(x, dim=1)
@@ -101,49 +111,49 @@ class BYOL(nn.Module):
         img_dims=(768, 1024),
         device="mps",
         hidden_features=2048,
-        output_features=256,
+        proj_output_features=256,
+        byol_lr=3e-4,
+        lin_eval_epochs=100,
     ):
         super(BYOL, self).__init__()
 
         self.student = pretraining_model.to(device)
-        self.teacher = copy.deepcopy(pretraining_model).to(device)
 
-        # freeze the teacher weights, only updates with EMA
+        # set the teacher as the copy of the student and freeze its weights
+        self.teacher = copy.deepcopy(pretraining_model).to(device)
         self.change_requires_grad(self.teacher, False)
 
         # defining objects and variables for the training
-        self.optimizer = torch.optim.Adam(self.student.parameters(), lr=3e-4)
-        self.dataloader = dataloader
-        self.val_dataloader = val_dataloader
+        self.dataloader, self.val_dataloader = dataloader, val_dataloader
         self.num_epochs = num_epochs
         self.lin_evaluation_frequency = lin_evaluation_frequency
         self.total_steps = len(dataloader) * num_epochs
         self.tau, self.tau_base = tau_base, tau_base
         self.input_dims = input_dims
         self.n_classes = n_classes
-        self.img_dims = img_dims
         self.device = device
-        self.hidden_features = hidden_features
-        self.output_features = output_features
         self.logdir = logdir
 
-        self.projection_head = self.get_projection_head().to(device)
+        self.projection_head = self.get_MLP_projector(img_dims, proj_output_features, hidden_features)
+        self.prediction_head = MLP(proj_output_features, proj_output_features, hidden_features, device)
+
+        self.wrapped_student = StudentWrapper(pretraining_model, self.projection_head, self.prediction_head)
+        self.optimizer = torch.optim.Adam(self.wrapped_student.parameters(), lr=byol_lr)
+
         self.aug1, self.aug2 = ByolAugmentations(img_dims).get_augmentations()
+
+        self.lin_eval_epochs = lin_eval_epochs
 
     def change_requires_grad(self, model, requires_grad):
         for param in model.parameters():
             param.requires_grad = requires_grad
 
-    def get_projection_head(self):
-        mock_input = torch.randn(2, self.input_dims, *self.img_dims).to(self.device)
+    def get_MLP_projector(self, img_dims, proj_output_features, hidden_features):
+        mock_input = torch.randn(2, self.input_dims, *img_dims).to(self.device)
         mock_output = self.student(mock_input)
 
         self.mock_student_output = mock_output
-
-        if len(mock_output.shape) == 2:
-            return ProjectAndNormalize2D(mock_output, self.hidden_features, self.output_features, self.device)
-        elif len(mock_output.shape) == 4:
-            return ProjectAndNormalize4D(mock_output, self.hidden_features, self.output_features, self.device)
+        return MLP(mock_output.shape[-1], proj_output_features, hidden_features, self.device)
 
     def update_teacher(self):
         for student_param, teacher_param in zip(self.student.parameters(), self.teacher.parameters()):
@@ -168,14 +178,17 @@ class BYOL(nn.Module):
     def forward_pass(self, x):
         view1, view2 = self.augment(x)
 
-        student_out_1 = self.projection_head(self.student(view1))
-        student_out_2 = self.projection_head(self.student(view2))
+        student_pred_1 = self.wrapped_student(view1)
+        student_pred_2 = self.wrapped_student(view2)
 
         with torch.no_grad():
-            teacher_out1 = self.projection_head(self.teacher(view1))
-            teacher_out2 = self.projection_head(self.teacher(view2))
+            teacher_proj_1 = self.projection_head(self.teacher(view1))
+            teacher_proj_2 = self.projection_head(self.teacher(view2))
 
-        loss = self.loss_fn(student_out_1, teacher_out2) + self.loss_fn(student_out_2, teacher_out1)
+            teacher_proj_1.detach_()
+            teacher_proj_2.detach_()
+
+        loss = self.loss_fn(student_pred_1, teacher_proj_2) + self.loss_fn(student_pred_2, teacher_proj_1)
 
         return loss.mean()
 
@@ -207,7 +220,9 @@ class BYOL(nn.Module):
     def linear_evaluation(self, after_k_epochs):
         print(f"\nPerforming linear evaluation after {after_k_epochs} epochs!\n")
         logger = get_tb_logger(self.logdir, f"_linear_evaluation_{after_k_epochs}_epochs")
-        linear_eval = LinearEvaluator(self.mock_student_output, self.n_classes, device=self.device)
+        linear_eval = LinearEvaluator(
+            self.mock_student_output, self.n_classes, device=self.device, epochs=self.lin_eval_epochs
+        )
         self.change_requires_grad(self.student, False)
         loop = tqdm(range(linear_eval.epochs), desc=f"Linear Eval Protocol after {after_k_epochs} epochs")
         for epoch in loop:
