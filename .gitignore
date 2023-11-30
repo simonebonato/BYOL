@@ -163,3 +163,4 @@ cython_debug/
 data
 test.ipynb
 .DS_Store
+logs
