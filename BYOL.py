@@ -134,10 +134,12 @@ class BYOL(nn.Module):
         self.device = device
         self.logdir = logdir
 
-        self.projection_head = self.get_MLP_projector(img_dims, proj_output_features, hidden_features)
+        self.student_projection_head = self.get_MLP_projector(img_dims, proj_output_features, hidden_features)
         self.prediction_head = MLP(proj_output_features, proj_output_features, hidden_features, device)
 
-        self.wrapped_student = StudentWrapper(pretraining_model, self.projection_head, self.prediction_head)
+        self.teacher_projection_head = copy.deepcopy(self.student_projection_head).to(device)
+
+        self.wrapped_student = StudentWrapper(pretraining_model, self.student_projection_head, self.prediction_head)
         self.optimizer = torch.optim.Adam(self.wrapped_student.parameters(), lr=byol_lr)
 
         self.aug1, self.aug2 = ByolAugmentations(img_dims).get_augmentations()
@@ -155,8 +157,8 @@ class BYOL(nn.Module):
         self.mock_student_output = mock_output
         return MLP(mock_output.shape[-1], proj_output_features, hidden_features, self.device)
 
-    def update_teacher(self):
-        for student_param, teacher_param in zip(self.student.parameters(), self.teacher.parameters()):
+    def EMA_update(self, teacher_model, student_model):
+        for student_param, teacher_param in zip(student_model.parameters(), teacher_model.parameters()):
             update_weights, old_weight = student_param.data, teacher_param.data
             teacher_param.data = self.tau * old_weight + (1 - self.tau) * update_weights
 
@@ -182,8 +184,8 @@ class BYOL(nn.Module):
         student_pred_2 = self.wrapped_student(view2)
 
         with torch.no_grad():
-            teacher_proj_1 = self.projection_head(self.teacher(view1))
-            teacher_proj_2 = self.projection_head(self.teacher(view2))
+            teacher_proj_1 = self.teacher_projection_head(self.teacher(view1))
+            teacher_proj_2 = self.teacher_projection_head(self.teacher(view2))
 
             teacher_proj_1.detach_()
             teacher_proj_2.detach_()
@@ -213,7 +215,9 @@ class BYOL(nn.Module):
                 loss = self.forward_pass(x)
                 self.backward_pass(loss)
 
-                self.update_teacher()
+                self.EMA_update(self.teacher, self.student)
+                self.EMA_update(self.teacher_projection_head, self.student_projection_head)
+
                 self.update_tau(step_counter)
                 step_counter += 1
 
