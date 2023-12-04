@@ -60,9 +60,12 @@ class BYOL_MaskRCNN(BYOL):
                 step_counter += 1
 
             if self.save_weights_every is not None and epoch % self.save_weights_every == 0:
-                torch.save(
-                    self.original_maskrcnn.model.state_dict(), self.save_model_path / f"pretrain_{epoch}_epochs.pth"
-                )
+                checkpoint = {
+                    "model": self.original_maskrcnn.model.state_dict(),
+                    "optimizer": None,
+                    "lr_scheduler": None
+                    }
+                torch.save(checkpoint, self.save_model_path / f"pretrain_{epoch}_epochs.pth")
 
 
 class MaskRCNNModelWrapper(torch.nn.Module):
