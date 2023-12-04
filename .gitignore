@@ -164,3 +164,5 @@ data
 test.ipynb
 .DS_Store
 logs
+*.pth
+events.out.*
