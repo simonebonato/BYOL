@@ -161,7 +161,6 @@ cython_debug/
 
 # my ignore
 data
-test.ipynb
 .DS_Store
 logs
 *.pth
