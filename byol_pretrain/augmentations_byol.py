@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torchvision.transforms as T
 
+
 class OptionalTransform:
     def __init__(self, transform, transform_params, p):
         self.transform = transform(**transform_params)
@@ -24,7 +25,10 @@ class Clamp:
 
 
 class ByolAugmentations:
-    def __init__(self, img_shape: tuple):
+    def __init__(self, img_shape: tuple, norm_mean=[0.5302, 0.5302, 0.5302], norm_std=[0.2247, 0.2247, 0.2247]):
+        """
+        The default values of the mean and std are for the karies dataset
+        """
         base_transforms = [
             T.RandomResizedCrop(size=img_shape, interpolation=T.InterpolationMode.BICUBIC),
             T.RandomHorizontalFlip(p=0.5),
@@ -41,7 +45,7 @@ class ByolAugmentations:
             base_transforms
             + [
                 OptionalTransform(T.GaussianBlur, {"kernel_size": (3, 3), "sigma": (0.1, 2.0)}, p=1.0),
-                T.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]),
+                T.Normalize(mean=norm_mean, std=norm_std),
             ]
         )
 
@@ -50,7 +54,7 @@ class ByolAugmentations:
             + [
                 OptionalTransform(T.GaussianBlur, {"kernel_size": (3, 3), "sigma": (0.1, 2.0)}, p=0.1),
                 OptionalTransform(T.RandomSolarize, {"threshold": 0.5}, p=0.2),
-                T.Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.2023, 0.1994, 0.2010]),
+                T.Normalize(mean=norm_mean, std=norm_std),
             ],
         )
 
