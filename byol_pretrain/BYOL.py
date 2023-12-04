@@ -1,99 +1,15 @@
-# %%
 import copy
-import time
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.transforms as T
-from augmentations import ByolAugmentations
+from augmentations_byol import ByolAugmentations
+from helper_classes import MLP, LinearEvaluator, StudentWrapper
+from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 from utils import get_tb_logger
-
-
-class ProjectAndNormalize4D(nn.Module):
-    def __init__(self, mock_output, hidden_size, output_size, device):
-        super(ProjectAndNormalize4D, self).__init__()
-        flattened_shape = mock_output.flatten(start_dim=1).shape
-
-        self.projection_layer = nn.Sequential(
-            nn.Flatten(start_dim=1),
-            nn.Linear(flattened_shape[1], hidden_size),
-            nn.BatchNorm1d(hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, output_size),
-        ).to(device)
-
-    def forward(self, x):
-        return self.projection_layer(x)
-
-
-class MLP(nn.Module):
-    def __init__(self, input_size, output_size, hidden_size, device):
-        super(MLP, self).__init__()
-
-        self.projection_layer = nn.Sequential(
-            nn.Linear(input_size, hidden_size),
-            nn.BatchNorm1d(hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_size, output_size),
-        ).to(device)
-
-    def forward(self, x):
-        return self.projection_layer(x)
-
-
-class StudentWrapper(nn.Module):
-    def __init__(self, student_net, projection_head, prediction_head):
-        super(StudentWrapper, self).__init__()
-        self.student_net = student_net
-        self.projection_head = projection_head
-        self.prediction_head = prediction_head
-
-    def forward(self, x):
-        x = self.student_net(x)
-        x = self.projection_head(x)
-        x = self.prediction_head(x)
-        return x
-
-
-class LinearEvaluator(nn.Module):
-    def __init__(self, mock_input, n_classes, device, lr=1e-4, epochs=30):
-        super(LinearEvaluator, self).__init__()
-        in_dims = mock_input.flatten(start_dim=1).shape[1]
-
-        self.flatten = nn.Flatten(start_dim=1)
-        self.linear_evaluator = nn.Linear(in_dims, n_classes)
-        self.optimizer = torch.optim.Adam(self.linear_evaluator.parameters(), lr)
-        self.epochs = epochs
-
-        self.loss_fn = nn.CrossEntropyLoss()
-        self.device = device
-        self.to(self.device)
-
-    def forward_backward(self, x, y, student_model, backward=True):
-        x = x.to(self.device)
-        y = y.to(self.device)
-
-        student_out = student_model(x)
-        _, loss, preds = self(student_out, y)
-        if backward:
-            self.backward(loss)
-        return loss, preds
-
-    def forward(self, x, y):
-        x = self.flatten(x)
-        x = self.linear_evaluator(x)
-
-        loss = self.loss_fn(x, y)
-        predictions = torch.argmax(x, dim=1)
-        return x, loss, predictions
-
-    def backward(self, loss):
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
 
 
 class BYOL(nn.Module):
@@ -104,7 +20,7 @@ class BYOL(nn.Module):
         val_dataloader,
         num_epochs,
         logdir,
-        lin_evaluation_frequency=10,
+        lin_evaluation_frequency: Optional[int] = 10,
         tau_base=0.99,
         input_dims=1,
         n_classes=10,
@@ -113,7 +29,8 @@ class BYOL(nn.Module):
         hidden_features=2048,
         proj_output_features=256,
         byol_lr=3e-4,
-        lin_eval_epochs=100,
+        lin_eval_epochs: int = 100,
+        mixed_precision_enabled=False,
     ):
         super(BYOL, self).__init__()
 
@@ -126,7 +43,6 @@ class BYOL(nn.Module):
         # defining objects and variables for the training
         self.dataloader, self.val_dataloader = dataloader, val_dataloader
         self.num_epochs = num_epochs
-        self.lin_evaluation_frequency = lin_evaluation_frequency
         self.total_steps = len(dataloader) * num_epochs
         self.tau, self.tau_base = tau_base, tau_base
         self.input_dims = input_dims
@@ -144,7 +60,15 @@ class BYOL(nn.Module):
 
         self.aug1, self.aug2 = ByolAugmentations(img_dims).get_augmentations()
 
+        self.lin_evaluation_frequency = lin_evaluation_frequency
         self.lin_eval_epochs = lin_eval_epochs
+
+        self.mixed_precision_enabled = mixed_precision_enabled
+
+    def batch_to_device(self, batch, device=None):
+        to_device = self.device if device is None else device
+        x, y = batch
+        return x.to(to_device), y.to(to_device)
 
     def change_requires_grad(self, model, requires_grad):
         for param in model.parameters():
@@ -196,24 +120,28 @@ class BYOL(nn.Module):
 
     def backward_pass(self, loss):
         self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+        self.scaler.scale(loss).backward()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
 
     def pretrain(self):
         step_counter = 0
+        self.scaler = GradScaler(enabled=self.mixed_precision_enabled)
         for epoch in range(self.num_epochs):
             loop = tqdm(enumerate(self.dataloader), leave=False)
 
-            if epoch % self.lin_evaluation_frequency == 0:
+            if isinstance(self.lin_evaluation_frequency, int) and epoch % self.lin_evaluation_frequency == 0:
                 self.linear_evaluation(epoch)
 
-            for idx, (x, _) in loop:
+            for idx, batch in loop:
                 loop.set_description(
                     f"Epoch {epoch + 1} / {self.num_epochs} | Step {idx} / {len(self.dataloader)} | Tau: {self.tau:.4f}"
                 )
-                x = x.to(self.device)
-                loss = self.forward_pass(x)
-                self.backward_pass(loss)
+                x, _ = self.batch_to_device(batch)
+
+                with autocast(enabled=self.mixed_precision_enabled):
+                    loss = self.forward_pass(x)
+                    self.backward_pass(loss)
 
                 self.EMA_update(self.teacher, self.student)
                 self.EMA_update(self.teacher_projection_head, self.student_projection_head)
@@ -233,21 +161,23 @@ class BYOL(nn.Module):
             train_loss, val_loss = 0, 0
             train_accuracy, val_accuracy = 0, 0
             linear_eval.train()
-            for idx, (x, y) in enumerate(self.dataloader):
+            for idx, batch in enumerate(self.dataloader):
+                x, y = self.batch_to_device(batch)
                 loss, preds = linear_eval.forward_backward(x, y, self.student)
 
                 # calculate the loss and the accuracy
                 train_loss += loss.item()
-                train_accuracy += (preds == y.to(self.device)).sum().item()
+                train_accuracy += (preds == y).sum().item()
 
             linear_eval.eval()
-            for idx, (x, y) in enumerate(self.val_dataloader):
+            for idx, batch in enumerate(self.val_dataloader):
                 with torch.no_grad():
+                    x, y = self.batch_to_device(batch)
                     loss, preds = linear_eval.forward_backward(x, y, self.student, backward=False)
 
                 # calculate the loss and the accuracy
                 val_loss += loss.item()
-                val_accuracy += (preds == y.to(self.device)).sum().item()
+                val_accuracy += (preds == y).sum().item()
 
             logger.add_scalar("LinearEvalLoss/Train", train_loss / len(self.dataloader), global_step=epoch)
             logger.add_scalar(

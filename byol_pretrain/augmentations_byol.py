@@ -2,7 +2,6 @@ import numpy as np
 import torch
 import torchvision.transforms as T
 
-
 class OptionalTransform:
     def __init__(self, transform, transform_params, p):
         self.transform = transform(**transform_params)
