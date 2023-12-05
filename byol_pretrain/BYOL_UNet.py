@@ -6,46 +6,36 @@ import torch.nn.functional as F
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 
+from .augmentations_byol import ByolAugmentations
 from .BYOL import BYOL_Class
 
 
-class BYOL_MaskRCNN_Class(BYOL_Class):
-    def __init__(self, *args, original_maskrcnn, save_weights_every, **kwargs):
-        super().__init__(*args, **kwargs)
+class BYOL_UNet_Class(BYOL_Class):
+    def __init__(self, *args, original_unet, save_weights_every, img_dims=1, **kwargs):
+        super(BYOL_UNet_Class, self).__init__(*args, **kwargs)
+
         self.lin_evaluation_frequency = None
         self.val_dataloader = None
 
-        self.original_maskrcnn = original_maskrcnn
+        self.original_unet = original_unet
         self.save_weights_every = save_weights_every
 
+        self.aug1, self.aug2 = ByolAugmentations(img_dims, norm_mean=[0.5302], norm_std=[0.2247]).get_augmentations()
+
         if save_weights_every is not None:
-            self.save_model_path = Path("./saved_pretrained_models/maskrcnn/") / self.logdir.stem
+            self.save_model_path = Path("./saved_pretrained_models/unet/") / self.logdir.stem
             self.save_model_path.mkdir(parents=True, exist_ok=True)
 
     def batch_to_device(self, batch, device=None):
-        if device is None:
-            device = self.device
-        for i in range(len(batch[0])):
-            batch[0][i] = batch[0][i].to(device)
-        for label_dict in batch[1]:
-            label_dict["boxes"] = label_dict["boxes"].to(device)
-            label_dict["labels"] = label_dict["labels"].to(device)
-            label_dict["masks"] = label_dict["masks"].to(device)
-
-        return batch[0], batch[1]
-
-    def augment(self, x):
-        view1 = [self.aug1(img) for img in x]
-        view2 = [self.aug2(img) for img in x]
-
-        return view1, view2
+        to_device = self.device if device is None else device
+        x, y, _ = batch
+        return x.to(to_device), None
 
     def pretrain(self):
         step_counter = 0
         self.scaler = GradScaler(enabled=self.mixed_precision_enabled)
         for epoch in range(self.num_epochs):
             loop = tqdm(enumerate(self.dataloader), leave=False)
-
             for idx, batch in loop:
                 loop.set_description(
                     f"Epoch {epoch + 1} / {self.num_epochs} | Step {idx} / {len(self.dataloader)} | Tau: {self.tau:.4f}"
@@ -64,33 +54,29 @@ class BYOL_MaskRCNN_Class(BYOL_Class):
 
             if self.save_weights_every is not None and epoch % self.save_weights_every == 0:
                 checkpoint = {
-                    "model": self.original_maskrcnn.model.state_dict(),
+                    "model": self.original_unet.model.state_dict(),
                     "optimizer": None,
                     "lr_scheduler": None,
                 }
                 torch.save(checkpoint, self.save_model_path / f"pretrain_{epoch}_epochs.pth")
 
 
-class MaskRCNNModelWrapper(torch.nn.Module):
-    def __init__(self, mask_rcnn_transform, mask_rcnn_backbone):
-        super(MaskRCNNModelWrapper, self).__init__()
-        self.transform = mask_rcnn_transform
-        self.backbone = mask_rcnn_backbone
+class UNetModelWrapper(torch.nn.Module):
+    def __init__(self, unet_encoder):
+        super(UNetModelWrapper, self).__init__()
+        self.unet_encoder = unet_encoder
 
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
         self.flatten = nn.Flatten(1)
 
-    def maskrcnn_reshape_transform(self, x: torch.Tensor):
-        target_size = x["0"].shape[-2:]
+    def unet_reshape_transform(self, feature_maps: list):
+        target_size = feature_maps[0].size()[-2:]
         interpolated_feature_maps = []
 
-        for key, feature_map in x.items():
-            # Skip interpolation if the feature map is already at the desired resolution
-            print(feature_map.shape)
-            if feature_map.shape[-2:] == target_size:
+        for feature_map in feature_maps:
+            if feature_map.size()[-2:] == target_size:
                 interpolated_feature_maps.append(feature_map)
             else:
-                # Interpolate feature map to match the target resolution
                 interpolated_feature_map = F.interpolate(
                     feature_map, size=target_size, mode="bilinear", align_corners=True
                 )
@@ -101,10 +87,8 @@ class MaskRCNNModelWrapper(torch.nn.Module):
         return concatenated_features
 
     def forward(self, x: torch.Tensor):
-        x = self.transform(x)[0].tensors
-        x = self.backbone(x)
-
-        x = self.maskrcnn_reshape_transform(x)
+        x = self.unet_encoder(x)
+        x = self.unet_reshape_transform(x)
         x = self.gap(x)
         x = self.flatten(x)
 

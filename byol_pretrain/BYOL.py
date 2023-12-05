@@ -5,14 +5,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from augmentations_byol import ByolAugmentations
-from helper_classes import MLP, LinearEvaluator, StudentWrapper
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
-from utils import get_tb_logger
+
+from .augmentations_byol import ByolAugmentations
+from .helper_classes import MLP, LinearEvaluator, StudentWrapper
+from .utils import get_tb_logger
 
 
-class BYOL(nn.Module):
+class BYOL_Class(nn.Module):
     def __init__(
         self,
         pretraining_model,
@@ -32,7 +33,7 @@ class BYOL(nn.Module):
         lin_eval_epochs: int = 100,
         mixed_precision_enabled=False,
     ):
-        super(BYOL, self).__init__()
+        super(BYOL_Class, self).__init__()
 
         self.student = pretraining_model.to(device)
 
@@ -75,10 +76,13 @@ class BYOL(nn.Module):
             param.requires_grad = requires_grad
 
     def get_MLP_projector(self, img_dims, proj_output_features, hidden_features):
-        mock_input = torch.randn(2, self.input_dims, *img_dims).to(self.device)
-        mock_output = self.student(mock_input)
+        self.student.to("cpu")
+        with torch.no_grad():
+            mock_input = torch.randn(2, self.input_dims, *img_dims, requires_grad=False)
+            mock_output = self.student(mock_input)
 
         self.mock_student_output = mock_output
+        self.student.to(self.device)
         return MLP(mock_output.shape[-1], proj_output_features, hidden_features, self.device)
 
     def EMA_update(self, teacher_model, student_model):
