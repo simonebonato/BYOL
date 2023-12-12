@@ -77,35 +77,16 @@ class MaskRCNNModelWrapper(torch.nn.Module):
         self.transform = mask_rcnn_transform
         self.backbone = mask_rcnn_backbone
 
-        self.gap = nn.AdaptiveAvgPool2d((1, 1))
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.flatten = nn.Flatten(1)
 
-    def maskrcnn_reshape_transform(self, x: torch.Tensor):
-        target_size = x["0"].shape[-2:]
-        interpolated_feature_maps = []
-
-        for key, feature_map in x.items():
-            # Skip interpolation if the feature map is already at the desired resolution
-            print(feature_map.shape)
-            if feature_map.shape[-2:] == target_size:
-                interpolated_feature_maps.append(feature_map)
-            else:
-                # Interpolate feature map to match the target resolution
-                interpolated_feature_map = F.interpolate(
-                    feature_map, size=target_size, mode="bilinear", align_corners=True
-                )
-                interpolated_feature_maps.append(interpolated_feature_map)
-
-        concatenated_features = torch.cat(interpolated_feature_maps, dim=1)
-
-        return concatenated_features
-
     def forward(self, x: torch.Tensor):
+
+        # treat x as a normal tensor, so the transform wants it to be a list
+        x = [i for i in x]
+
         x = self.transform(x)[0].tensors
-        x = self.backbone(x)
-
-        x = self.maskrcnn_reshape_transform(x)
-        x = self.gap(x)
+        x = self.backbone(x)['pool']
+        x = self.avgpool(x)
         x = self.flatten(x)
-
         return x
