@@ -1,11 +1,9 @@
 import torch
-import torchvision.transforms as T
-from byol_pretrain.BYOL_MaskRCNN import MaskRCNNModelWrapper
 from karies.config import MaskRCNNConfig, ModelConfig, ModelTypes, Task
 from karies.models import MaskRCNN
 from pixel_level_contrastive_learning import PixelCL
+from pixpro_utils import MaskRCNNModelWrapper
 from torch.cuda.amp import GradScaler
-from torchvision.models import resnet50
 from tqdm import tqdm
 
 base_config: ModelConfig = {
@@ -20,7 +18,7 @@ base_config: ModelConfig = {
     "path_model": "/cluster/group/karies_2022/Simone/karies/karies-models/AAA_BYOL_test/BYOL/saved_pretrained_models/maskrcnn-weekend-test-batch-6/",
     "load_model_name": "pretrain_80_epochs.pth",
     "num_epochs": 100,
-    "image_shape": [768, 768],
+    "image_shape": [500, 500],
     "dataset": "dataset_4k",
     "labels_json": "labels_caries.json",
     "histogram_eq": False,
@@ -47,7 +45,7 @@ wrap = MaskRCNNModelWrapper(
 
 learner = PixelCL(
     wrap,
-    image_size=(768, 768),
+    image_size=(500, 500),
     hidden_layer_pixel="backbone.body.layer4",  # leads to output of 8x8 feature map for pixel-level learning
     hidden_layer_instance=-1,  # leads to output for instance-level learning
     projection_size=256,  # size of projection output, 256 was used in the paper
@@ -82,7 +80,7 @@ for epoch in range(1000):
         scaler.update()
         learner.update_moving_average()  # update moving average of target encoder
 
-    if epoch % 100 == 0:
+    if epoch % 10 == 0:
         torch.save(
             m.model.state_dict(),
             f"/cluster/group/karies_2022/Simone/karies/karies-models/AAA_BYOL_test/BYOL/maskrcnn_pixpro_weights/pretrained_weights_{epoch}_epochs.pth",
