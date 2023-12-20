@@ -1,11 +1,12 @@
-import torch
-from torch.utils.data import DataLoader
-import torch.nn as nn
-from karies.data.dataset import CariesDataset
 from typing import Dict, Tuple
+
 import cv2
 import numpy as np
-
+import torch
+import torch.nn as nn
+import torchvision.transforms as T
+from karies.data.dataset import CariesDataset
+from torch.utils.data import DataLoader
 
 
 class MaskRCNNModelWrapper(nn.Module):
@@ -29,17 +30,15 @@ class MaskRCNNModelWrapper(nn.Module):
 
 
 class PretrainingDataset(CariesDataset):
-
     def __init__(
         self,
         config,
         mode,
         only_seg_masks: bool = False,
-        crop_size: int= 112,
+        crop_size: int = 112,
     ):
         super().__init__(config, mode, only_seg_masks)
         self.crop_size = crop_size
-        self.config = config
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
@@ -64,10 +63,11 @@ class PretrainingDataset(CariesDataset):
         masks = torch.tensor(np.zeros_like(image))
         image_tensor, _ = self.apply_augmentations_image_and_masks(image, masks)
 
-        return image_tensor
-    
-    def get_data_loaders(self):
+        image_tensor = T.RandomCrop(self.crop_size)(image_tensor)
 
+        return image_tensor
+
+    def get_data_loaders(self):
         gen = torch.Generator()
         if self.config["fix_random_seed"] > -1:
             gen.manual_seed(self.config["fix_random_seed"])
@@ -83,4 +83,3 @@ class PretrainingDataset(CariesDataset):
             generator=gen,
         )
         return SSL_loader
-    
