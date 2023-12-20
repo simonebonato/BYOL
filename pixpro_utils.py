@@ -29,6 +29,22 @@ class MaskRCNNModelWrapper(nn.Module):
         return x
 
 
+class UNetModelWrapper(nn.Module):
+    def __init__(self, encoder):
+        super(UNetModelWrapper, self).__init__()
+        self.encoder = encoder
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.flatten = nn.Flatten(1)
+
+    def forward(self, x):
+        x = x[:, 0:1]
+        x = self.encoder(x)[-1]
+        x = self.avgpool(x)
+        x = self.flatten(x)
+
+        return x
+
+
 class PretrainingDataset(CariesDataset):
     def __init__(
         self,
@@ -62,7 +78,6 @@ class PretrainingDataset(CariesDataset):
 
         masks = torch.tensor(np.zeros_like(image))
         image_tensor, _ = self.apply_augmentations_image_and_masks(image, masks)
-
         image_tensor = T.RandomCrop(self.crop_size)(image_tensor)
 
         return image_tensor
