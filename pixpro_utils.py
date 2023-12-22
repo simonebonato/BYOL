@@ -7,6 +7,7 @@ import torch.nn as nn
 import torchvision.transforms as T
 from karies.data.dataset import CariesDataset
 from torch.utils.data import DataLoader
+from pixel_level_contrastive_learning.pixel_level_contrastive_learning import PixelCL, NetWrapper
 
 
 class MaskRCNNModelWrapper(nn.Module):
@@ -15,8 +16,15 @@ class MaskRCNNModelWrapper(nn.Module):
         self.transform = mask_rcnn_transform
         self.backbone = mask_rcnn_backbone
 
+        self.extra_layer = nn.Sequential(
+            nn.Conv2d(256, 256, (3, 3), padding="same"),
+            nn.MaxPool2d(3, stride=2)
+        )
+
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.flatten = nn.Flatten(1)
+
+        self.pixel_layer_cheat = mask_rcnn_backbone.fpn.layer_blocks[-1]
 
     def forward(self, x: torch.Tensor):
         # treat x as a normal tensor, so the transform wants it to be a list
@@ -24,15 +32,20 @@ class MaskRCNNModelWrapper(nn.Module):
 
         x = self.transform(x)[0].tensors
         x = self.backbone(x)["pool"]
+
+        x = self.extra_layer(x)
+
         x = self.avgpool(x)
         x = self.flatten(x)
         return x
-
 
 class UNetModelWrapper(nn.Module):
     def __init__(self, encoder):
         super(UNetModelWrapper, self).__init__()
         self.encoder = encoder
+
+        self.pixel_layer = encoder.layer4
+
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.flatten = nn.Flatten(1)
 
@@ -43,7 +56,6 @@ class UNetModelWrapper(nn.Module):
         x = self.flatten(x)
 
         return x
-
 
 class PretrainingDataset(CariesDataset):
     def __init__(
@@ -98,3 +110,14 @@ class PretrainingDataset(CariesDataset):
             generator=gen,
         )
         return SSL_loader
+    
+def print_model_size(model):
+    param_size = 0
+    for param in model.parameters():
+        param_size += param.nelement() * param.element_size()
+    buffer_size = 0
+    for buffer in model.buffers():
+        buffer_size += buffer.nelement() * buffer.element_size()
+
+    size_all_mb = (param_size + buffer_size) / 1024**2
+    print("model size: {:.3f}MB".format(size_all_mb))
