@@ -56,6 +56,14 @@ class PretrainingDataset(CariesDataset):
         super().__init__(config, mode, only_seg_masks)
         self.crop_size = crop_size
 
+        self.image_transform = T.Compose(
+            [
+                T.ToTensor(),
+                T.Resize((self.config["image_shape"][0], self.config["image_shape"][1]), antialias=True),
+                T.RandomCrop(self.crop_size),
+            ]
+        )
+
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Get item from dataset.
@@ -70,15 +78,7 @@ class PretrainingDataset(CariesDataset):
         image = cv2.imread(str(label["path"]), cv2.IMREAD_COLOR)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        if self.config["histogram_eq"]:
-            image = (image[:, :, 0] * 255).astype(np.uint8)
-            image = self.equalize_clahe_image(image)
-            image = image.astype(np.float32) / 255.0
-            image = np.expand_dims(image, -1).repeat(3, -1)
-
-        masks = torch.tensor(np.zeros_like(image))
-        image_tensor, _ = self.apply_augmentations_image_and_masks(image, masks)
-        image_tensor = T.RandomCrop(self.crop_size)(image_tensor)
+        image_tensor = self.image_transform(image)
 
         return image_tensor
 
