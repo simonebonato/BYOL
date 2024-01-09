@@ -1,13 +1,16 @@
-from typing import Dict, Tuple
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 import cv2
-import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from karies.data.dataset import CariesDataset
+from pixel_level_contrastive_learning.pixel_level_contrastive_learning import (
+    NetWrapper,
+    PixelCL,
+)
 from torch.utils.data import DataLoader
-from pixel_level_contrastive_learning.pixel_level_contrastive_learning import PixelCL, NetWrapper
 
 
 class MaskRCNNModelWrapper(nn.Module):
@@ -16,10 +19,7 @@ class MaskRCNNModelWrapper(nn.Module):
         self.transform = mask_rcnn_transform
         self.backbone = mask_rcnn_backbone
 
-        self.extra_layer = nn.Sequential(
-            nn.Conv2d(256, 256, (3, 3), padding="same"),
-            nn.MaxPool2d(3, stride=2)
-        )
+        self.extra_layer = nn.Sequential(nn.Conv2d(256, 256, (3, 3), padding="same"), nn.MaxPool2d(3, stride=2))
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.flatten = nn.Flatten(1)
@@ -39,6 +39,7 @@ class MaskRCNNModelWrapper(nn.Module):
         x = self.flatten(x)
         return x
 
+
 class UNetModelWrapper(nn.Module):
     def __init__(self, encoder):
         super(UNetModelWrapper, self).__init__()
@@ -57,24 +58,59 @@ class UNetModelWrapper(nn.Module):
 
         return x
 
+
 class PretrainingDataset(CariesDataset):
     def __init__(
         self,
         config,
         mode,
+        dataset,
         only_seg_masks: bool = False,
         crop_size: int = 112,
+        unlabelled: Optional[str] = None,
     ):
-        super().__init__(config, mode, only_seg_masks)
+        assert dataset in ["4k", "test"], "The dataset can be only 4k or test"
+        assert unlabelled is None or unlabelled in ["bw", "bw+"], "Unlabelled can be None or one between ['bw', 'bw+]"
+        self.config = config
+        self.mode = mode
+        self.only_seg_masks = only_seg_masks
+
+        data4k = Path("/cluster/group/karies_2022/Data/dataset_4k/images/")
+        unlabelled_bw = Path("/cluster/group/karies_2022/Data/unlabelled_images/BW für FH Jan24")
+        einzelzahnbilder = Path("/cluster/group/karies_2022/Data/unlabelled_images/Einzelzahnbilder")
+
+        self.img_paths = []
+
+        for paket in data4k.glob("*"):
+            self.img_paths.extend(list((data4k / paket).glob("*")))
+            if dataset == "test":
+                break
+
+        if unlabelled == "bw+":
+            self.img_paths.extend(list(einzelzahnbilder.glob("*")))
+        if unlabelled in ["bw", "bw+"]:
+            self.img_paths.extend(list(unlabelled_bw.glob("*")))
+
+        if self.config["image_shape"] is not None:
+            self.img_resize = T.Resize((self.config["image_shape"][0], self.config["image_shape"][1]), antialias=True)
+            self.mask_resize = T.Resize((self.config["image_shape"][0], self.config["image_shape"][1]), antialias=None)
+
         self.crop_size = crop_size
 
-        self.image_transform = T.Compose(
-            [
-                T.ToTensor(),
-                T.Resize((self.config["image_shape"][0], self.config["image_shape"][1]), antialias=True),
-                T.RandomCrop(self.crop_size),
-            ]
-        )
+        image_transform = [
+            T.ToTensor(),
+            T.RandomCrop(self.crop_size),
+        ]
+        if self.config["image_shape"] is not None:
+            image_transform.insert(
+                1, T.Resize((self.config["image_shape"][0], self.config["image_shape"][1]), antialias=True)
+            )
+
+        self.image_transform = T.Compose(image_transform)
+
+    def __len__(self) -> int:
+        """Get length of dataset."""
+        return len(self.img_paths)
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
@@ -86,8 +122,8 @@ class PretrainingDataset(CariesDataset):
         Returns:
             Tuple[torch.Tensor, Dict[str, torch.Tensor]]: image tensor and label dict with boxes, labels and masks
         """
-        label: Dict = self.labels[index]
-        image = cv2.imread(str(label["path"]), cv2.IMREAD_COLOR)
+
+        image = cv2.imread(str(self.img_paths[index]), cv2.IMREAD_COLOR)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         image_tensor = self.image_transform(image)
@@ -110,7 +146,8 @@ class PretrainingDataset(CariesDataset):
             generator=gen,
         )
         return SSL_loader
-    
+
+
 def print_model_size(model):
     param_size = 0
     for param in model.parameters():
