@@ -65,6 +65,7 @@ class PretrainingDataset(CariesDataset):
         config,
         mode,
         dataset,
+        in_channels,
         only_seg_masks: bool = False,
         crop_size: int = 112,
         unlabelled: Optional[str] = None,
@@ -74,6 +75,7 @@ class PretrainingDataset(CariesDataset):
         self.config = config
         self.mode = mode
         self.only_seg_masks = only_seg_masks
+        self.in_channels = in_channels
 
         data4k = Path("/cluster/group/karies_2022/Data/dataset_4k/images/")
         unlabelled_bw = Path("/cluster/group/karies_2022/Data/unlabelled_images/BW für FH Jan24")
@@ -125,8 +127,10 @@ class PretrainingDataset(CariesDataset):
 
         image = cv2.imread(str(self.img_paths[index]), cv2.IMREAD_COLOR)
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
         image_tensor = self.image_transform(image)
+
+        if self.in_channels == 1:
+            image_tensor = image_tensor[0:1]
 
         return image_tensor
 
